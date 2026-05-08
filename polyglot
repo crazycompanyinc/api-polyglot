@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+Polyglot CLI
+Usage:
+    polyglot ask "listar issues de github"
+    polyglot call GET https://api.github.com/repos/owner/repo/issues
+    polyglot discover github
+    polyglot apis
+"""
+
+import sys
+import os
+import json
+import argparse
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src import Polyglot, ask as polyglot_ask, get as polyglot_get
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="polyglot", description="API Polyglot Agent")
+    sub = parser.add_subparsers(dest="command")
+
+    # ask
+    ask_p = sub.add_parser("ask", help="Call an API from natural language")
+    ask_p.add_argument("intent", help="What you want to do")
+    ask_p.add_argument("--param", "-p", action="append", help="Extra params (key=value)")
+    ask_p.add_argument("--cache", type=int, default=0, help="Cache TTL in seconds")
+    ask_p.add_argument("--json", action="store_true", help="Raw JSON output")
+
+    # call
+    call_p = sub.add_parser("call", help="Direct API call")
+    call_p.add_argument("method", help="HTTP method")
+    call_p.add_argument("url", help="Full URL")
+    call_p.add_argument("--param", "-p", action="append", help="Query params (key=value)")
+    call_p.add_argument("--header", "-H", action="append", help="Headers (Key: Value)")
+    call_p.add_argument("--body", "-d", help="JSON body string")
+    call_p.add_argument("--cache", type=int, default=0, help="Cache TTL in seconds")
+    call_p.add_argument("--json", action="store_true", help="Raw JSON output")
+
+    # discover
+    disc_p = sub.add_parser("discover", help="Discover and profile an API")
+    disc_p.add_argument("query", help="URL, name, or description")
+    disc_p.add_argument("--json", action="store_true", help="Raw JSON output")
+
+    # apis
+    sub.add_parser("apis", help="List known APIs")
+
+    # profiles
+    sub.add_parser("profiles", help="List learned API profiles")
+
+    # serve
+    serve_p = sub.add_parser("serve", help="Start HTTP server")
+    serve_p.add_argument("--port", type=int, default=7878, help="Port")
+    serve_p.add_argument("--host", default="127.0.0.1", help="Host")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    poly = Polyglot()
+
+    if args.command == "ask":
+        kwargs = {}
+        if args.param:
+            for p in args.param:
+                k, v = p.split("=", 1)
+                kwargs[k] = v
+        if args.cache:
+            kwargs["cache_ttl"] = args.cache
+        resp = poly.ask(args.intent, **kwargs)
+        if args.json:
+            print(json.dumps({"status": resp.status_code, "data": resp.data, "error": resp.error}, default=str, indent=2))
+        else:
+            _print_response(resp)
+
+    elif args.command == "call":
+        params = {}
+        if args.param:
+            for p in args.param:
+                k, v = p.split("=", 1)
+                params[k] = v
+        headers = {}
+        if args.header:
+            for h in args.header:
+                k, v = h.split(":", 1)
+                headers[k.strip()] = v.strip()
+        body = None
+        if args.body:
+            body = json.loads(args.body)
+        resp = poly.call(args.method, args.url, headers=headers or None, params=params or None, body=body, cache_ttl=args.cache)
+        if args.json:
+            print(json.dumps({"status": resp.status_code, "data": resp.data, "error": resp.error}, default=str, indent=2))
+        else:
+            _print_response(resp)
+
+    elif args.command == "discover":
+        profile = poly.discover(args.query)
+        if args.json:
+            if profile:
+                print(json.dumps({"name": profile.name, "base_url": profile.base_url,
+                                  "auth_type": profile.auth_type, "endpoints": profile.endpoints}, indent=2))
+            else:
+                print(json.dumps({"error": "Could not discover"}))
+        else:
+            if profile:
+                print(f"Discovered: {profile.name}")
+                print(f"  URL:      {profile.base_url}")
+                print(f"  Auth:     {profile.auth_type}")
+                for ep in profile.endpoints[:15]:
+                    print(f"  {ep['method']:6s} {ep['path']}  —  {ep.get('desc', '')}")
+            else:
+                print("Could not discover API.")
+
+    elif args.command == "apis":
+        apis = poly.list_apis()
+        print("Known APIs:")
+        for api in apis["known"]:
+            auth = "🔑" if api["auth_required"] else "🔓"
+            print(f"  {auth} {api['name']:20s} {api['base_url']}")
+        if apis["learned"]:
+            print("\nLearned APIs:")
+            for p in apis["learned"]:
+                print(f"  📦 {p['name']:20s} {p['base_url']} ({p['uses']} uses)")
+
+    elif args.command == "profiles":
+        profiles = poly.list_apis()["learned"]
+        for p in profiles:
+            print(f"  {p['name']:20s} {p['base_url']:40s} auth={p['auth_type']:8s} uses={p['uses']}")
+
+    elif args.command == "serve":
+        from src.api.server import serve
+        serve(host=args.host, port=args.port)
+
+
+def _print_response(resp):
+    if resp.error:
+        print(f"  ❌ Error: {resp.error}")
+        return
+    data = resp.data
+    if isinstance(data, list):
+        print(f"  ✅ {resp.status_code} | {len(data)} results | {resp.duration_ms:.0f}ms")
+        for item in data[:10]:
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("name") or item.get("login") or str(item)[:80]
+                print(f"    - {title}")
+            else:
+                print(f"    - {str(item)[:100]}")
+        if len(data) > 10:
+            print(f"    ... and {len(data) - 10} more")
+    elif isinstance(data, dict):
+        print(f"  ✅ {resp.status_code} | {resp.duration_ms:.0f}ms")
+        for k, v in list(data.items())[:15]:
+            v_str = str(v)[:100] if not isinstance(v, str) else v[:100]
+            print(f"    {k}: {v_str}")
+    else:
+        print(f"  ✅ {resp.status_code} | {resp.duration_ms:.0f}ms")
+        print(f"    {str(data)[:500]}")
+
+
+if __name__ == "__main__":
+    main()
